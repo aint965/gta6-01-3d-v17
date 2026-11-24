@@ -21,7 +21,12 @@
   #hud-speed .num { font-size: 44px; font-weight: 800; line-height: 1; }
   #hud-speed .unit { font-size: 13px; color: #cfe0e6; }
   #hud-preset { font-size: 12px; margin-top: 4px; color: #ffd28a; }
+  #hud-dialog { top: 125px; left: 50%; transform: translateX(-50%); font-size: 15px; padding: 8px 16px; max-width: 640px; text-align: center; color: #ffd28a; display: none; }
+  #hud-prompt { top: 190px; left: 50%; transform: translateX(-50%); font-size: 14px; padding: 6px 14px; color: #ffffff; background: rgba(255, 210, 26, 0.85); border: 1px solid rgba(255,255,255,0.3); border-radius: 8px; text-shadow: none; font-weight: 700; display: none; }
   #hud-controls { bottom: 12px; left: 50%; transform: translateX(-50%); font-size: 13px; padding: 6px 14px; white-space: nowrap; }
+  #hud-cash { font-size: 20px; font-weight: 800; color: #7dff9e; }
+  #hud-damage { font-size: 12px; color: #ff8a7a; }
+  #hud-profile { font-size: 12px; margin-top: 4px; color: #cfe0e6; }
   #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>
 </head>
@@ -33,15 +38,20 @@
   <div id="hud-objective"></div>
 </div>
 <div class="hud panel" id="hud-compass"></div>
+<div class="hud panel" id="hud-dialog"></div>
+<div class="hud" id="hud-prompt"></div>
 <div class="hud" id="hud-minimap">
   <div class="label">SOLMAR — MINIMAP</div>
   <canvas id="minimap" width="220" height="200"></canvas>
 </div>
 <div class="hud panel" id="hud-speed">
   <div><span class="num" id="hud-speed-num">0</span> <span class="unit">km/h</span></div>
+  <div id="hud-cash">$0</div>
+  <div id="hud-damage"></div>
   <div id="hud-preset"></div>
+  <div id="hud-profile"></div>
 </div>
-<div class="hud panel" id="hud-controls">WASD drive &nbsp;·&nbsp; 1/2/3 light &nbsp;·&nbsp; T cycle light &nbsp;·&nbsp; Q collect &nbsp;·&nbsp; X drop cargo &nbsp;·&nbsp; E interact</div>
+<div class="hud panel" id="hud-controls">WASD drive &nbsp;·&nbsp; 1/2/3 light &nbsp;·&nbsp; T cycle light &nbsp;·&nbsp; 4/5/6/7 car &nbsp;·&nbsp; B next car &nbsp;·&nbsp; Space handbrake &nbsp;·&nbsp; Q collect &nbsp;·&nbsp; X drop cargo &nbsp;·&nbsp; E interact</div>
 <p id="status" role="status" aria-live="polite"></p>
 <script type="module" src="./src/main.js"></script>
 </body>

@@ -86,3 +86,104 @@ engine) + the real-city Solmar, seed 20261123, in `game/`:
 - `checks/layout.mjs`, `checks/driver.mjs`, `checks/report.md` (this file)
 - `screenshots/{1-boulevard-day,2-sunset-street,3-night,4-plaza}.jpg`
 - `shots.json` (4 shots), `package.json` (type: module, kills the Node warning)
+
+---
+
+# Stage B report — driving, traffic, headlights, collisions, E, missions 1–4
+
+## What was built
+`game/src/sim.js` is now the single simulation (pure, no DOM/WebGL; imported by
+`main.js` and `checks/sim.mjs`): 4 driving profiles, animated traffic on 4 loops
+obeying the 26 s light cycle, headlights, OBB collisions, on-foot + E enter/exit,
+missions 1–4 ($2,000 total, mission 4 = $800 finale with broadcast). `main.js`
+was rewritten on top of it (the Stage A standalone player physics is gone);
+`render.js` draws peds, mission markers (ground disc + bobbing diamond + additive
+beam), dynamic traffic-light lenses, and headlight cones as an additive pass;
+`index.html` gained cash / damage / profile / dialog / prompt HUD.
+
+## Verification (measured)
+- Node sim `node checks/sim.mjs`: **33/33 PASS**.
+  - Top speeds EXACT: compact 115.00, sedan 130.00, van 108.00, coupe 158.00 km/h.
+  - Reverse 20.9 m in 2.5 s; red-light stop 3.7 m before the line.
+  - Traffic 90 s: 21 stops, **0 red-runs**, 0 overlaps, all on roads; forced
+    tailgating min follow gap **8.8 m** over 30 s (target 8).
+  - Missions 1–4 autopilot: **4/4 done, cash $2,000** ($250+$500+$450+$800),
+    **0 collisions, 0 red-runs, 826 s**, broadcast fired; timer 0 before first move.
+  - E: prompt at 5.0 m, enter/exit works, Mara spawns 3.0 m beside the car.
+  - Building collision: damage 26.6, shake 0.97; wreck at 100 damage tows the
+    car with a $50 penalty (cash $150 after the test wreck).
+  - Render state: 142 cars, 40 peds, 13 light states.
+- Headless driver `node checks/driver.mjs`: **4/4 shots ready, 0 console errors,
+  0 failed requests** (regression check on the Stage A scenes).
+- Browser driver `node checks/drive.mjs`: **drive-day shot + headlight pixel test
+  + mission autotest, 0 console errors, 0 failed requests**.
+  - Drive-day: E enters the car, midday, W 3 s — car drove 155 m north on the
+    boulevard (screenshot: 94 km/h, traffic ahead, HUD complete).
+  - Headlight pixel test (night, player at (400,2000), traffic car 15 m ahead):
+    **PASS both haze variants** — asphalt mean gain **+51.1** (≥+20), **100%** of
+    pixels > +10 (≥90%), roof of the car ahead **+29.9** (≥+20), unlit control
+    **0** (within 1).
+  - Browser autotest `?autotest=missions`: **done, cash $2,000, 0 collisions,
+    0 red-runs** (same result as the Node sim).
+  - Shots: `checks/shots/{drive-day,night-headlight,autotest-end}.jpg`.
+- Packaging: `MAKEFUN_OUTPUT_DIR=checks/out1 node main.ts` vs `out2` —
+  **byte-identical** (`diff -r` clean), dossier 620,269 B, sha256
+  `6b94f41f1f5f1421584c738367ee690aabdd3d17f348f617993fa58135327bff`.
+
+## Bugs found and fixed
+1. Red-light stop gap −13.8 m (car overshot the line): sedan stops from 36 m/s
+   in 26 m, but the test braked from 12 m. Fixed: brake from 30 m (test change).
+2. Autopilot drove into parked cars: the overtake aim shifted the FAR waypoint
+   by 8 m (a 0.35° correction at 1,300 m). Fixed: aim at a near point (20 m
+   ahead, 8 m to the side).
+3. Autopilot U-turn drifted 36 m west off the boulevard (10 s reversing) and
+   then hugged the curb into parked cars: two causes — the far-waypoint aim gave
+   a 0.03 rad lateral correction, and car-vs-car circles (r=2.6) collided cars
+   5 m apart side-by-side. Fixed: pure-pursuit aim (30 m lookahead), reverse
+   phase only until |yawDiff| < 2.2, and OBB-vs-OBB car collision (new
+   `obbVsObb`).
+4. Autopilot crashed on `route[wp]` undefined: the last waypoint (dist 5.5–6 m)
+   fell through the arrival branch into the advance branch. Fixed: guard
+   `wp >= route.length` + don't advance past the last waypoint.
+5. "Leg timeout at final waypoint": `legTime` measures the whole leg (147 s for
+   a 2,960 m leg), so the 120 s branch budget fired on arrival. Fixed: separate
+   `finalWpTime`; per-leg timeout from route length (length/15 + 60 s); cruise
+   22 -> 30 m/s; total budget 600 -> 1,200 s (all 8 legs total ~22,300 m).
+6. Mission 4 missing from `perMission` (finale leaves phase at 'dropoff').
+   Fixed: record on delivery legs (`leg % 2 === 1`).
+7. Tower in the middle of the plaza intersection (x 388–412, z 1716–1740)
+   blocked the boulevard route — the car clipped it at (413,1725). Fixed:
+   legs 0 and 7 route around it through the 20 m west gap (x=380).
+8. Traffic red-runs 23 in 855 s (0 in 90 s): the cross axis flips green->red
+   with no yellow, and red braking at 6 m/s² needed 10.1 m from 11 m/s.
+   Fixed: committed-light detection (a red-run counts only if the car was
+   committed while the light was already red), 8 m/s² red braking, conservative
+   yellow stop, and a green time-to-clear check. Now 0 in 855 s.
+9. Autopilot T-boned a traffic car turning at the avenue + blew past a turn
+   while overtaking (5 collisions). Fixed: traffic gives the player a 6 m
+   lateral follow-gap window (was 3 m); no new overtake within 40 m of a
+   waypoint turn, active overtake cancelled within 25 m.
+10. Browser autotest timed out on leg 0: the `?autotest` page built the sim
+    on foot (`startInCar: false`). Fixed: autotest/headlight pages start in a car.
+11. Headlight test gains 0: crossed-trapezoid cones are edge-on from the chase
+    camera (the vertical one covers ~0 pixels), and the asphalt patch sat
+    beyond the cone/pool reach. Fixed: cones are a stack of camera-facing
+    additive discs; asphalt patch moved to (400,1980), inside the pool.
+12. First headlight discs blew out to a white blob (+202 gain). Fixed:
+    brightnesses cut ~5x (summed centre ~0.5), elliptical discs (taller than
+    wide) so they still reach the roof. Now +51.1 / +29.9.
+13. HUD: the `#hud-controls` rule was lost in the index.html edit (bar floated
+    to the top and overlapped the title/compass/dialog). Fixed: rule restored,
+    dialog moved to top 125 px, prompt to 190 px.
+14. `drive.mjs` wrote to repo-root `shots/` instead of `checks/shots/`
+    (wrong `..` in the OUT path). Fixed; stray dir removed.
+
+## Honest limitations (Stage B scope, for Stage C)
+- The headlight discs read as faint concentric arcs on the road in daylight if
+  you look closely; at night they read as a proper beam.
+- The day-shot foreground is still mostly empty asphalt (Stage A chase view);
+  Stage C's final screenshots should frame busier stretches.
+- The moon is still a big flat white disc (Stage A sky); the traffic car ahead
+  is only lit by the headlights, not by the street lamps.
+- The player car does not stop at red lights (GTA-style: running them is
+  allowed); only traffic red-runs are counted.

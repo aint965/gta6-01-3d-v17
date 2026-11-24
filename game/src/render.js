@@ -279,11 +279,10 @@ export function buildStatic(city) {
     m.ground(l.x - 2.5, l.z - 2.5, l.x + 2.5, l.z + 2.5, 0.1, hexRgb('#ffca7a'), { emi: [0.35, 0.22, 0.08] });
   }
   for (const tl of city.lights) {
+    // Pole + housing only: the lenses are drawn dynamically per frame (their
+    // lit state follows the sim's light cycle). The lens boxes sit at z+0.56.
     m.box(tl.x, 2.75, tl.z, 0.3, 5.5, 0.3, 0, hexRgb('#2c3438'));
     m.box(tl.x, 5.8, tl.z, 1.0, 2.4, 1.0, 0, hexRgb('#1a1d20'));
-    m.box(tl.x, 6.5, tl.z + 0.55, 0.5, 0.5, 0.2, 0, hexRgb('#ff2a1a'), { emi: [0.9, 0.1, 0.05] });
-    m.box(tl.x, 5.8, tl.z + 0.55, 0.5, 0.5, 0.2, 0, hexRgb('#5a4a1a'), { emi: [0.05, 0.04, 0.01] });
-    m.box(tl.x, 5.1, tl.z + 0.55, 0.5, 0.5, 0.2, 0, hexRgb('#1a3a1a'), { emi: [0.02, 0.05, 0.02] });
   }
   for (const bo of city.boats) {
     m.box(bo.x, 1, bo.z, bo.len, 2, 5, bo.yaw, hexRgb('#8a4a34'), { top: hexRgb('#d8cbb2') });
@@ -386,6 +385,113 @@ function drawCar(m, car) {
   part(0.6, 0.95, 2.21, 0.5, 0.25, 0.1, hexRgb('#ff2a1a'), { emi: [0.8, 0.1, 0.05] });
 }
 
+// One pedestrian: legs + jacket torso + head, rotated by yaw.
+function drawPed(m, p) {
+  const c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+  const rot = (x, z) => [p.x + x * c + z * s, p.z - x * s + z * c];
+  const part = (ox, oy, oz, sx, sy, sz, col) => {
+    const [wx, wz] = rot(ox, oz);
+    m.box(wx, oy, wz, sx, sy, sz, p.yaw, col);
+  };
+  const jacket = hexRgb(p.jacket || '#7a4a8a');
+  part(0, 0.4, 0, 0.5, 0.8, 0.35, hexRgb('#2c3438')); // legs
+  part(0, 1.15, 0, 0.62, 0.7, 0.4, jacket); // torso
+  part(0, 1.68, 0, 0.36, 0.36, 0.36, hexRgb('#d8a882')); // head
+}
+
+// Mission marker: ground disc + floating bobbing diamond. The beam is drawn in
+// the additive pass (a solid pillar would read as a wall in daylight).
+function drawMarker(m, marker, time) {
+  const col = hexRgb(marker.color || '#ffd21a');
+  const emi = [col[0] * 0.85, col[1] * 0.85, col[2] * 0.85];
+  // Ground disc: 12-triangle fan at y=0.12.
+  const cx = marker.x, cz = marker.z;
+  for (let i = 0; i < 12; i += 1) {
+    const a0 = (i / 12) * Math.PI * 2, a1 = ((i + 1) / 12) * Math.PI * 2;
+    m.tri([cx, 0.12, cz],
+      [cx + Math.cos(a0) * 3, 0.12, cz + Math.sin(a0) * 3],
+      [cx + Math.cos(a1) * 3, 0.12, cz + Math.sin(a1) * 3],
+      [0, 1, 0], col, emi);
+  }
+  // Floating diamond (octahedron): bobs with time.
+  const y = 4.5 + Math.sin(time * 2.5) * 0.6;
+  const top = [cx, y + 1.3, cz], bot = [cx, y - 1.3, cz];
+  const eq = [];
+  for (let i = 0; i < 4; i += 1) {
+    const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+    eq.push([cx + Math.cos(a) * 1.1, y, cz + Math.sin(a) * 1.1]);
+  }
+  for (let i = 0; i < 4; i += 1) {
+    const j = (i + 1) % 4;
+    m.tri(top, eq[i], eq[j], [0, 1, 0], col, emi);
+    m.tri(bot, eq[j], eq[i], [0, -1, 0], col, emi);
+  }
+}
+
+// Traffic-light lenses, one per light: the active lens glows, the others are dim.
+function drawLenses(m, lights) {
+  const defs = [
+    { y: 6.5, col: '#ff2a1a', on: [0.9, 0.1, 0.05], off: [0.05, 0.01, 0.01], state: 'red' },
+    { y: 5.8, col: '#ffb400', on: [0.9, 0.6, 0.05], off: [0.06, 0.04, 0.01], state: 'yellow' },
+    { y: 5.1, col: '#2aff5a', on: [0.1, 0.9, 0.2], off: [0.01, 0.05, 0.02], state: 'green' },
+  ];
+  for (const l of lights || []) {
+    for (const d of defs) {
+      const lit = l.state === d.state;
+      m.box(l.x, d.y, l.z + 0.56, 0.5, 0.5, 0.2, 0, hexRgb(d.col), { emi: lit ? d.on : d.off });
+    }
+  }
+}
+
+// A headlight cone as a stack of additive discs facing the camera (a light
+// shaft). Crossed trapezoids do NOT work from the chase view: the vertical one
+// is edge-on to the camera, so it covers ~0 pixels. The discs face the camera
+// directly, so they wash the road and the car ahead; each disc is dimmer and
+// wider than the last (apex bright warm, base dim).
+function drawCone(m, hx, hy, hz, yaw) {
+  const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+  const rx = Math.cos(yaw), rz = -Math.sin(yaw);
+  const zero = [0, 0, 0];
+  const discs = [
+    // Summed centre brightness ~0.5 (not 2.65): the old values blew the beam
+    // out to a white blob (+202 gain). Elliptical (taller than wide) so the
+    // discs reach the roof of the car ahead, 1.1 m above the beam axis.
+    { d: 5, r: 0.8, e: [0.18, 0.15, 0.09] },
+    { d: 9, r: 1.3, e: [0.13, 0.11, 0.06] },
+    { d: 13, r: 1.8, e: [0.09, 0.08, 0.04] },
+    { d: 17, r: 2.3, e: [0.06, 0.05, 0.03] },
+    { d: 21, r: 2.8, e: [0.04, 0.03, 0.02] },
+  ];
+  for (const disc of discs) {
+    const cx = hx + fx * disc.d, cy = hy, cz = hz + fz * disc.d;
+    const seg = 12;
+    for (let i = 0; i < seg; i += 1) {
+      const a0 = (i / seg) * Math.PI * 2, a1 = ((i + 1) / seg) * Math.PI * 2;
+      const p0 = [cx + rx * Math.cos(a0) * disc.r, cy + Math.sin(a0) * disc.r * 1.5, cz + rz * Math.cos(a0) * disc.r];
+      const p1 = [cx + rx * Math.cos(a1) * disc.r, cy + Math.sin(a1) * disc.r * 1.5, cz + rz * Math.cos(a1) * disc.r];
+      // Fan triangle: centre, p0, p1. (The disc's up axis is world Y.)
+      m.v(cx, cy, cz, 0, 1, 0, zero, disc.e, 0, 0, 0, 1, 0, 0);
+      m.v(p0[0], p0[1], p0[2], 0, 1, 0, zero, disc.e, 0, 0, 0, 1, 0, 0);
+      m.v(p1[0], p1[1], p1[2], 0, 1, 0, zero, disc.e, 0, 0, 0, 1, 0, 0);
+    }
+  }
+}
+
+// Ground light pool ahead of the car: bright near, dim far (per-vertex emissive).
+function drawPool(m, hx, hz, yaw) {
+  const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+  const rx = Math.cos(yaw), rz = -Math.sin(yaw);
+  const near = 3, far = 24, wNear = 2.2, wFar = 5.5;
+  const bright = [0.45, 0.36, 0.2], dim = [0.05, 0.04, 0.02];
+  const zero = [0, 0, 0];
+  const p = (along, side, e) => {
+    const x = hx + fx * along + rx * side, z = hz + fz * along + rz * side;
+    m.v(x, 0.1, z, 0, 1, 0, zero, e, 0, 0, 0, 1, 0, 0);
+  };
+  p(near, -wNear, bright); p(near, wNear, bright); p(far, wFar, dim);
+  p(near, -wNear, bright); p(far, wFar, dim); p(far, -wFar, dim);
+}
+
 export function createRenderer(canvas, city) {
   const gl = canvas.getContext('webgl2', { antialias: true });
   if (!gl) throw new Error('WebGL2 unavailable');
@@ -456,6 +562,32 @@ export function createRenderer(canvas, city) {
 
   const moonDir = norm3([-0.18, 0.36, -0.92]);
 
+  // Project a world point to drawing-buffer pixels (origin top-left).
+  // Same math as draw(): perspective * lookAt. Returns {x, y, behind}.
+  function projectWorld(view, point) {
+    const w = canvas.width || 1280, h = canvas.height || 720;
+    const proj = perspective(Math.PI / 3, w / h, 0.5, 4000);
+    const vw = lookAt(view.cam, view.target, [0, 1, 0]);
+    const p = [point[0], point[1], point[2], 1];
+    // view * p
+    const v = [
+      vw[0] * p[0] + vw[4] * p[1] + vw[8] * p[2] + vw[12] * p[3],
+      vw[1] * p[0] + vw[5] * p[1] + vw[9] * p[2] + vw[13] * p[3],
+      vw[2] * p[0] + vw[6] * p[1] + vw[10] * p[2] + vw[14] * p[3],
+      vw[3] * p[0] + vw[7] * p[1] + vw[11] * p[2] + vw[15] * p[3],
+    ];
+    // proj * v
+    const c = [
+      proj[0] * v[0] + proj[4] * v[1] + proj[8] * v[2] + proj[12] * v[3],
+      proj[1] * v[0] + proj[5] * v[1] + proj[9] * v[2] + proj[13] * v[3],
+      proj[2] * v[0] + proj[6] * v[1] + proj[10] * v[2] + proj[14] * v[3],
+      proj[3] * v[0] + proj[7] * v[1] + proj[11] * v[2] + proj[15] * v[3],
+    ];
+    if (c[3] <= 0) return { x: 0, y: 0, behind: true };
+    const nx = c[0] / c[3], ny = c[1] / c[3];
+    return { x: ((nx + 1) / 2) * w, y: ((1 - ny) / 2) * h, behind: false };
+  }
+
   function draw(view) {
     const preset = PRESETS[view.preset] || PRESETS.midday;
     const w = canvas.clientWidth || 1280, h = canvas.clientHeight || 720;
@@ -473,7 +605,8 @@ export function createRenderer(canvas, city) {
     gl.uniform3fv(U.lightCol, preset.lightCol);
     gl.uniform3fv(U.amb, preset.amb);
     gl.uniform3fv(U.fogCol, hexRgb(preset.fog));
-    gl.uniform1f(U.fogDen, preset.fogDen);
+    // view.haze === false disables the fog (headlight test control).
+    gl.uniform1f(U.fogDen, view.haze === false ? 0 : preset.fogDen);
     gl.uniform1f(U.emiBoost, preset.emi);
     gl.uniform1f(U.sunI, preset.sunI);
     gl.uniform1f(U.moonI, preset.moonI);
@@ -489,7 +622,11 @@ export function createRenderer(canvas, city) {
     gl.drawArrays(gl.TRIANGLES, 0, staticCount);
 
     dyn.reset();
-    for (const car of view.cars) drawCar(dyn, car);
+    for (const car of view.cars || []) drawCar(dyn, car);
+    for (const p of view.peds || []) drawPed(dyn, p);
+    if (view.mara) drawPed(dyn, { ...view.mara, jacket: '#d77f69' });
+    for (const mk of view.markers || []) drawMarker(dyn, mk, view.time || 0);
+    drawLenses(dyn, view.lights || []);
     gl.bindBuffer(gl.ARRAY_BUFFER, dynBuf);
     bindAttribs(dynBuf);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, dyn.toArray());
@@ -498,7 +635,50 @@ export function createRenderer(canvas, city) {
     gl.bindBuffer(gl.ARRAY_BUFFER, skyBuf);
     bindAttribs(skyBuf);
     gl.drawArrays(gl.TRIANGLES, 0, skyCount);
+
+    // Additive pass: headlight cones + ground pool + marker beams. Depth-tested
+    // (occluded by buildings/cars) but depth-write off, ONE/ONE blending.
+    const hl = view.headlights;
+    const beams = view.markers || [];
+    if ((hl && hl.on) || beams.length) {
+      dyn.reset();
+      if (hl && hl.on) {
+        const fx = -Math.sin(hl.yaw), fz = -Math.cos(hl.yaw);
+        const rx = Math.cos(hl.yaw), rz = -Math.sin(hl.yaw);
+        for (const side of [-0.6, 0.6]) {
+          // Apex at the front bumper (2.2 m ahead of the centre) + lateral offset.
+          const hx = hl.x + fx * 2.2 + rx * side, hz = hl.z + fz * 2.2 + rz * side;
+          drawCone(dyn, hx, 0.9, hz, hl.yaw);
+        }
+        drawPool(dyn, hl.x + fx * 2.2, hl.z + fz * 2.2, hl.yaw);
+      }
+      for (const mk of beams) {
+        // Two crossed vertical quads, dim warm, from the ground to y=25.
+        const col = hexRgb(mk.color || '#ffd21a');
+        const e = [col[0] * 0.25, col[1] * 0.25, col[2] * 0.25];
+        const zero = [0, 0, 0];
+        const q = (x0, z0, x1, z1) => {
+          dyn.v(x0, 0, z0, 0, 1, 0, zero, e, 0, 0, 0, 1, 0, 0);
+          dyn.v(x1, 0, z1, 0, 1, 0, zero, e, 0, 0, 0, 1, 0, 0);
+          dyn.v(x1, 25, z1, 0, 1, 0, zero, e, 0, 0, 0, 1, 0, 0);
+          dyn.v(x0, 0, z0, 0, 1, 0, zero, e, 0, 0, 0, 1, 0, 0);
+          dyn.v(x1, 25, z1, 0, 1, 0, zero, e, 0, 0, 0, 1, 0, 0);
+          dyn.v(x0, 25, z0, 0, 1, 0, zero, e, 0, 0, 0, 1, 0, 0);
+        };
+        q(mk.x - 0.6, mk.z, mk.x + 0.6, mk.z);
+        q(mk.x, mk.z - 0.6, mk.x, mk.z + 0.6);
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, dynBuf);
+      bindAttribs(dynBuf);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, dyn.toArray());
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE);
+      gl.depthMask(false);
+      gl.drawArrays(gl.TRIANGLES, 0, dyn.count);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
   }
 
-  return { draw, stats: { staticVerts: staticCount, skyVerts: skyCount } };
+  return { draw, projectWorld, gl, stats: { staticVerts: staticCount, skyVerts: skyCount } };
 }
