@@ -305,8 +305,20 @@ export function createSim(city, opts = {}) {
       mara: { x: 400, z: 1505, yaw: 0, speed: 0 },
       speed: 0, yaw: 0, cash: 0, damage: 0,
       carrying: false, wrecked: false,
+      // Spawn coordinates as values: spawnCar IS the player car object, so
+      // reading spawnCar.x after the car has moved returns its current spot.
+      spawnX: spawnCar.x, spawnZ: spawnCar.z, spawnYaw: spawnCar.yaw,
     },
     traffic, routes, stops, lights: LIGHTS, peds,
+    stopLines,
+    // Solmar PD: HEAT 0-5. Patrols cruise the boulevard; follow at HEAT 1-2,
+    // chase at HEAT 3+. Arrest = HEAT 3+, player slow, a patrol close, 3 s.
+    police: {
+      heat: 0, lastInfraction: 0, decayAt: 0, arrestHold: 0, arrests: 0,
+      lastRedRun: -999, playerSlowFor: 0,
+      prevLine: stopLines.map((s) => lineSigned(s, spawnCar.x, spawnCar.z)),
+      patrols: [],
+    },
     missions: {
       index: 0, phase: 'pickup', timer: 0, timerRunning: false, done: false,
       dialog: { speaker: 'Neri', text: MISSIONS[0].dialog.text, until: 7 },
@@ -315,6 +327,7 @@ export function createSim(city, opts = {}) {
     shake: 0, dust: [], events: [],
     stats: { stops: 0, redRuns: 0, collisions: 0, trafficOverlaps: 0, minFollowGap: Infinity, maxSpeedKmh: 0, topSpeeds: {} },
   };
+  createPatrols(sim);
   if (startInCar) {
     sim.player.yaw = spawnCar.yaw;
     sim.player.speed = 0;
@@ -360,6 +373,8 @@ export function collect(sim) {
   if (sim.missions.phase === 'pickup') {
     sim.player.carrying = true;
     sim.missions.phase = 'dropoff';
+    // The hot pickups are watched: mission 2 (Rook's patrols) and the finale.
+    if (m.id === 2 || m.id === 4) addHeat(sim, 1, 'mission ' + m.id + ' pickup');
     setDialog(sim, 'Neri', 'Got it. Now run it to the drop — same road, no detours.');
     sim.events.push({ type: 'collect', mission: m.id, t: sim.time });
   } else {
@@ -471,13 +486,14 @@ function stepPlayerCar(sim, input, dt) {
       spawnDust(sim, car.x - Math.sin(p.yaw) * 2.2, car.z - Math.cos(p.yaw) * 2.2);
       sim.events.push({ type: 'collision', what: 'building', speed: impact, damage: dmg, t: sim.time });
       sim.stats.collisions += 1;
+      if (impact > 12) addHeat(sim, 1, 'crash');
     }
     p.speed *= impact > 2 ? -0.15 : 0.5;
     break;
   }
   // Car-vs-car collision (OBB vs OBB — circles over-report side-by-side
-  // passing) with parked / drivable / traffic cars.
-  const others = [...sim.city.cars, ...sim.traffic];
+  // passing) with parked / drivable / traffic / patrol cars.
+  const others = [...sim.city.cars, ...sim.traffic, ...sim.police.patrols];
   for (const o of others) {
     if (o === car) continue;
     const dx = car.x - o.x, dz = car.z - o.z;
@@ -492,22 +508,38 @@ function stepPlayerCar(sim, input, dt) {
       spawnDust(sim, car.x, car.z);
       sim.events.push({ type: 'collision', what: 'car', speed: Math.abs(p.speed), damage: dmg, t: sim.time });
       sim.stats.collisions += 1;
+      if (Math.abs(p.speed) > 12) addHeat(sim, 1, 'crash');
       if (o.kind === 'traffic') o.slowUntil = sim.time + 1;
     }
     p.speed *= 0.4;
     break;
+  }
+  // Running a red light adds HEAT (one count per intersection: 5 s cooldown).
+  const pol = sim.police;
+  for (let i = 0; i < sim.stopLines.length; i += 1) {
+    const s = sim.stopLines[i];
+    const d = lineSigned(s, car.x, car.z);
+    const lat = s.axis === 'z' ? Math.abs(car.x - s.x) : Math.abs(car.z - s.z);
+    const prev = pol.prevLine[i];
+    pol.prevLine[i] = d;
+    if (prev === 0 || prev * d > 0) continue; // no crossing
+    if (lat > 10) continue;
+    if (Math.abs(p.speed) < 3) continue;
+    if (stateForAxis(s.light, sim.time, s.axis) !== 'red') continue;
+    if (sim.time - pol.lastRedRun < 5) continue;
+    pol.lastRedRun = sim.time;
+    addHeat(sim, 1, 'red light');
   }
   // Wrecked at 100 damage: Mara is forced out, the car is towed back to its
   // spawn spot repaired, cash penalty $50.
   if (p.damage >= 100) {
     p.damage = 0;
     p.cash = Math.max(0, p.cash - 50);
-    const spawn = p.spawnCar;
-    car.x = spawn.x; car.z = spawn.z; car.yaw = spawn.yaw;
-    p.yaw = spawn.yaw; p.speed = 0;
-    p.mara.x = clamp(spawn.x + 3, 20, CITY_W - 20);
-    p.mara.z = clamp(spawn.z + 3, 20, CITY_H - 20);
-    p.mara.yaw = spawn.yaw;
+    car.x = p.spawnX; car.z = p.spawnZ; car.yaw = p.spawnYaw;
+    p.yaw = p.spawnYaw; p.speed = 0;
+    p.mara.x = clamp(p.spawnX + 3, 20, CITY_W - 20);
+    p.mara.z = clamp(p.spawnZ + 3, 20, CITY_H - 20);
+    p.mara.yaw = p.spawnYaw;
     p.mode = 'foot';
     p.car = null;
     setDialog(sim, 'Neri', 'That car is wrecked — I had it towed back to the boulevard. Fifty bucks for the tow. Walk to it and get back in.');
@@ -617,7 +649,7 @@ function stepTraffic(sim, dt) {
     // Follow gap: nearest car ahead in the same lane (local frame). The
     // player gets a wider lateral window (6 m vs 3 m): a player turning
     // across the lane is still a hazard the traffic car must brake for.
-    const all = [...sim.traffic, sim.player.car].filter(Boolean);
+    const all = [...sim.traffic, sim.player.car, ...sim.police.patrols].filter(Boolean);
     for (const o of all) {
       if (o === car) continue;
       const dx = o.x - car.x, dz = o.z - car.z;
@@ -663,6 +695,180 @@ function stepPeds(sim, dt) {
   }
 }
 
+// --- Solmar PD ----------------------------------------------------------------------
+// Signed distance from a point to a stop line along the line's axis.
+function lineSigned(s, x, z) {
+  return s.axis === 'z' ? z - s.z : x - s.x;
+}
+
+function addHeat(sim, n, why) {
+  const pol = sim.police;
+  pol.heat = Math.min(5, pol.heat + n);
+  pol.lastInfraction = sim.time;
+  pol.decayAt = sim.time + 25;
+  sim.events.push({ type: 'heatUp', heat: pol.heat, why, t: sim.time });
+}
+
+function createPatrols(sim) {
+  const route = sim.routes[0]; // the boulevard loop
+  for (let i = 0; i < 2; i += 1) {
+    const s = (i * 2400 + 300) % route.length;
+    const p = routePoint(route, s);
+    sim.police.patrols.push({
+      kind: 'patrol', x: p.x, z: p.z, yaw: p.yaw, speed: 0, s,
+      mode: 'patrol', color: '#1a1d24',
+    });
+  }
+}
+
+// Nearest route distance to a point (used when a patrol returns to its loop
+// after a chase: the loop position it left is stale).
+function nearestRouteS(route, x, z) {
+  let bestS = 0, bestD = Infinity;
+  for (let s = 0; s < route.length; s += 5) {
+    const p = pointAtRaw(route.pts, route.cum, route.length, s);
+    const d = Math.hypot(p[0] - x, p[1] - z);
+    if (d < bestD) { bestD = d; bestS = s; }
+  }
+  return bestS;
+}
+
+function stepPolice(sim, dt) {
+  const pol = sim.police;
+  const p = sim.player;
+  const pos = playerPos(sim);
+  const pSpeed = p.mode === 'car' ? Math.abs(p.speed) : Math.abs(p.mara.speed);
+  // How long the player has been slow (< 3 m/s): the chase only pulls up
+  // close after 1.5 s stopped, so a 3-point turn or a waypoint stop never
+  // gets a patrol in the player's face.
+  pol.playerSlowFor = pSpeed < 3 ? pol.playerSlowFor + dt : 0;
+  // HEAT decay: 1 level per 25 s clean and out of sight of every patrol.
+  if (pol.heat > 0 && sim.time >= pol.decayAt) {
+    const seen = pol.patrols.some((pt) => Math.hypot(pt.x - pos.x, pt.z - pos.z) < 60);
+    if (!seen) {
+      pol.heat = Math.max(0, pol.heat - 1);
+      sim.events.push({ type: 'heatDown', heat: pol.heat, t: sim.time });
+    }
+    pol.decayAt = sim.time + 25;
+  }
+  const route = sim.routes[0];
+  for (const pt of pol.patrols) {
+    const mode = pol.heat >= 3 ? 'chase' : pol.heat >= 1 ? 'follow' : 'patrol';
+    if (mode === 'patrol' && pt.mode !== 'patrol') pt.s = nearestRouteS(route, pt.x, pt.z);
+    pt.mode = mode;
+    const dPlayer = Math.hypot(pt.x - pos.x, pt.z - pos.z);
+    let tx, tz, maxSpeed;
+    if (mode === 'patrol') {
+      const rp = routePoint(route, (pt.s + 12) % route.length);
+      tx = rp.x; tz = rp.z; maxSpeed = 8;
+    } else {
+      // Hold a point behind the player: 25 m in follow, 12 m in chase, and
+      // 4.5 m once the player has sat still 1.5 s (the arrest pull-up: right
+      // on the bumper, just outside the 4.4 m OBB overlap, so the patrol
+      // never shoves the player's car around). A patrol already inside its
+      // hold distance stays put — it never turns around and drives away
+      // from the player it is watching.
+      const back = mode === 'chase' ? (pol.playerSlowFor > 1.5 ? 4.5 : 12) : 25;
+      if (dPlayer <= back) {
+        tx = pt.x; tz = pt.z; maxSpeed = 0;
+      } else {
+        // Behind the player: forward is (-sin yaw, -cos yaw), so behind is
+        // (+sin yaw, +cos yaw).
+        const pyaw = p.mode === 'car' ? p.yaw : p.mara.yaw;
+        tx = pos.x + Math.sin(pyaw) * back;
+        tz = pos.z + Math.cos(pyaw) * back;
+        maxSpeed = mode === 'chase' ? 26 : 20;
+      }
+    }
+    movePatrol(sim, pt, tx, tz, maxSpeed, dt);
+    if (mode === 'patrol') pt.s = (pt.s + pt.speed * dt) % route.length;
+  }
+  // Arrest: HEAT 3+, player slow, a patrol within 5 m, held 3 s.
+  const nearest = Math.min(...pol.patrols.map((pt) => Math.hypot(pt.x - pos.x, pt.z - pos.z)));
+  if (pol.heat >= 3 && pSpeed < 3 && nearest < 5) {
+    pol.arrestHold += dt;
+    if (pol.arrestHold >= 3) doArrest(sim);
+  } else pol.arrestHold = 0;
+}
+
+function movePatrol(sim, pt, tx, tz, maxSpeed, dt) {
+  const dx = tx - pt.x, dz = tz - pt.z;
+  const d = Math.hypot(dx, dz);
+  // Yaw convention (same as routePoint): forward is (-sin yaw, -cos yaw),
+  // so the yaw toward (dx, dz) is atan2(-dx, -dz).
+  const targetYaw = Math.atan2(-dx, -dz);
+  const dy = wrapAngle(targetYaw - pt.yaw);
+  // Proportional approach: the patrol slows as it nears its hold point, so
+  // it never overshoots into the player's bumper at 26 m/s. Gain 1.0 keeps
+  // the steady-state lag behind a 15 m/s player near 16 m, not 40 m.
+  let want = Math.min(maxSpeed, Math.max(0, (d - 1.5) * 1.0));
+  // Brake hard before a sharp turn: a fast car that turns 180 deg while
+  // still moving arcs straight into whatever it was chasing.
+  if (Math.abs(dy) > 1.0) want = Math.min(want, 4);
+  if (d < 1.5) want = 0;
+  // Do not rear-end a traffic car ahead: match its speed, never stop dead.
+  // Forward is (-sin yaw, -cos yaw); right is (cos yaw, -sin yaw).
+  if (want > 0) {
+    for (const o of sim.traffic) {
+      const ox = o.x - pt.x, oz = o.z - pt.z;
+      const fwd = -(ox * Math.sin(pt.yaw) + oz * Math.cos(pt.yaw));
+      const lat = Math.abs(ox * Math.cos(pt.yaw) - oz * Math.sin(pt.yaw));
+      if (fwd > 0 && fwd < 12 && lat < 3) { want = Math.min(want, o.speed); break; }
+    }
+  }
+  pt.yaw = wrapAngle(pt.yaw + clamp(dy, -1.9 * dt, 1.9 * dt));
+  if (pt.speed < want) pt.speed = Math.min(want, pt.speed + 14 * dt);
+  else if (pt.speed > want) pt.speed = Math.max(want, pt.speed - 25 * dt);
+  // Forward is (-sin yaw, -cos yaw), same as the player car.
+  pt.x -= Math.sin(pt.yaw) * pt.speed * dt;
+  pt.z -= Math.cos(pt.yaw) * pt.speed * dt;
+  for (const b of sim.city.buildings) {
+    if (Math.abs((b.x0 + b.x1) / 2 - pt.x) > (b.x1 - b.x0) / 2 + 6) continue;
+    if (Math.abs((b.z0 + b.z1) / 2 - pt.z) > (b.z1 - b.z0) / 2 + 6) continue;
+    const hit = obbVsAabb(pt.x, pt.z, pt.yaw, 1.0, 2.2, b);
+    if (hit) { pt.x += hit.px; pt.z += hit.pz; }
+  }
+}
+
+function doArrest(sim) {
+  const pol = sim.police;
+  pol.arrests += 1;
+  pol.heat = 0;
+  pol.arrestHold = 0;
+  pol.decayAt = 0;
+  pol.playerSlowFor = 0;
+  const fine = 100;
+  sim.player.cash = Math.max(0, sim.player.cash - fine);
+  const wasCarrying = sim.player.carrying;
+  const m = activeMission(sim);
+  if (!sim.missions.done && m) {
+    sim.missions.phase = 'pickup';
+    sim.missions.timer = 0;
+    sim.missions.timerRunning = false;
+  }
+  sim.player.carrying = false;
+  // Tow the car to the spawn and put Mara on foot at the park centre.
+  const car = sim.player.car;
+  if (car) { car.x = sim.player.spawnX; car.z = sim.player.spawnZ; car.yaw = sim.player.spawnYaw; }
+  sim.player.yaw = sim.player.spawnYaw;
+  sim.player.speed = 0;
+  sim.player.mara.x = 2410;
+  sim.player.mara.z = 710;
+  sim.player.mara.yaw = 0;
+  sim.player.mode = 'foot';
+  sim.player.car = null;
+  setDialog(sim, 'Neri', `BUSTED — $${fine} fine, mission blown. Walk it off. The car is back at the depot and the money is gone.`, 6);
+  sim.events.push({ type: 'arrested', fine, wasCarrying, cash: sim.player.cash, t: sim.time });
+}
+
+export function getPolice(sim) {
+  return {
+    heat: sim.police.heat,
+    arrests: sim.police.arrests,
+    patrols: sim.police.patrols.map((p) => ({ x: p.x, z: p.z, yaw: p.yaw, mode: p.mode })),
+  };
+}
+
 export function stepSim(sim, input, dt) {
   sim.time += dt;
   const moving = input.fwd || input.back || input.left || input.right;
@@ -673,6 +879,7 @@ export function stepSim(sim, input, dt) {
   if (sim.player.mode === 'car') stepPlayerCar(sim, input, dt);
   else stepMara(sim, input, dt);
   stepTraffic(sim, dt);
+  stepPolice(sim, dt);
   stepPeds(sim, dt);
   sim.shake = Math.max(0, sim.shake - 2 * dt);
   for (const d of sim.dust) {
@@ -687,7 +894,7 @@ export function getRenderCars(sim) {
   // City cars (parked + drivable + traffic at their live positions) + the
   // player car when Mara is on foot (it is one of the city cars already, so
   // nothing extra is needed — the player car IS a city car entry).
-  return [...sim.city.cars, ...sim.traffic];
+  return [...sim.city.cars, ...sim.traffic, ...sim.police.patrols];
 }
 
 export function getRenderPeds(sim) {
@@ -785,7 +992,7 @@ export function runMissionAutopilot(sim, maxSeconds = 1200, trace = null) {
         // No new overtake near a waypoint turn: the overtake aim (20 m ahead)
         // would carry the car past the turn and off the road.
         const scan = dist > 40 ? Math.max(16, Math.abs(sim.player.speed) * 1.5) : 0;
-        for (const o of [...sim.traffic, ...sim.city.cars]) {
+        for (const o of [...sim.traffic, ...sim.city.cars, ...sim.police.patrols]) {
           if (o === car) continue;
           const f = frame(o);
           if (f.long > 0 && f.long < scan && Math.abs(f.lat) < 3.5) {

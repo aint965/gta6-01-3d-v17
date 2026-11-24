@@ -175,13 +175,112 @@ for (const [id, prof] of Object.entries(PROFILES)) {
   const peds = getRenderPeds(sim);
   const markers = getMarkers(sim);
   const lights = getLightStates(sim);
-  check('render cars = city + traffic', cars.length === city.cars.length + sim.traffic.length, `${cars.length} cars`);
+  check('render cars = city + traffic + patrols', cars.length === city.cars.length + sim.traffic.length + sim.police.patrols.length, `${cars.length} cars`);
   check('render peds = 40', peds.length === 40, `${peds.length} peds`);
   check('mission marker present', markers.length === 1 && markers[0].phase === 'pickup', markers.length ? `${markers[0].label}` : 'none');
   check('traffic light states = 13', lights.length === 13 && lights.every((l) => ['red', 'yellow', 'green'].includes(l.state)), lights.map((l) => l.state[0]).join(''));
   const t = activeTarget(sim);
   check('mission 2 pickup is a person in a car', MISSIONS[1].pickup.personInCar === true, 'marker must point at the car, never a building');
   void t;
+}
+
+// 10. Solmar PD: patrols exist, HEAT rises on a red run and on a hard crash,
+// decays when clean and out of sight, patrols chase, and a 3 s stop at
+// HEAT 3+ with a patrol on the bumper ends in an arrest.
+{
+  const sim = createSim(city, { startInCar: true, traffic: true });
+  const patrols = sim.police.patrols;
+  check('patrols: 2 Solmar PD cars on the boulevard',
+    patrols.length === 2 && patrols.every((p) => p.kind === 'patrol' && p.mode === 'patrol' && p.x >= 380 && p.x <= 420),
+    patrols.map((p) => `${Math.round(p.x)},${Math.round(p.z)}`).join(' | '));
+
+  // Red run: wait for the 1440-row light to go red, then drive north through
+  // the z=1461 stop line from the spawn (400, 1500).
+  {
+    const s = createSim(city, { startInCar: true, traffic: false });
+    const line = s.stopLines.find((l) => l.z === 1461);
+    const light = line.light;
+    let guard = 0;
+    while (lightState(light, s.time).primary !== 'red' && guard < 40 * 60) { stepSim(s, idle, dt); guard += 1; }
+    const heat0 = s.police.heat;
+    let crossed = false;
+    for (let i = 0; i < 20 * 60; i += 1) {
+      stepSim(s, full, dt);
+      if (s.player.car.z < 1461) { crossed = true; break; }
+    }
+    check('red-light run raises HEAT +1', crossed && s.police.heat >= heat0 + 1,
+      `crossed=${crossed} heat ${heat0} -> ${s.police.heat} (light red at t=${s.time.toFixed(1)})`);
+    check('red-run event recorded', s.events.some((e) => e.type === 'heatUp' && e.why === 'red light'),
+      s.events.filter((e) => e.type === 'heatUp').map((e) => e.why).join(', ') || 'none');
+  }
+
+  // Hard crash: same setup as the building-collision test, HEAT must rise.
+  {
+    const s = createSim(city, { startInCar: true, traffic: false, profile: 'sedan' });
+    const car = s.player.car;
+    car.x = 400; car.z = 2000; car.yaw = -Math.PI / 2;
+    s.player.yaw = -Math.PI / 2; s.player.speed = 0;
+    for (let i = 0; i < 10 * 60; i += 1) {
+      stepSim(s, full, dt);
+      if (s.player.damage > 0) break;
+    }
+    check('hard crash raises HEAT +1', s.police.heat >= 1, `heat ${s.police.heat}, damage ${s.player.damage.toFixed(1)}`);
+  }
+
+  // Decay: HEAT 2, player far from every patrol (beach road), 30 s idle.
+  {
+    const s = createSim(city, { startInCar: true, traffic: true });
+    s.police.heat = 2;
+    s.police.decayAt = 25;
+    s.player.car.x = 3600; s.player.car.z = 1080; // beach road, far from the boulevard loop
+    for (let i = 0; i < 30 * 60; i += 1) stepSim(s, idle, dt);
+    check('HEAT decays 1 level per 25 s out of sight', s.police.heat === 1, `heat ${s.police.heat} after 30 s`);
+  }
+
+  // Chase: HEAT 3, player cruising 15 m/s north, a patrol 100 m behind.
+  {
+    const s = createSim(city, { startInCar: true, traffic: false });
+    s.police.heat = 3;
+    s.police.decayAt = 1e9;
+    const car = s.player.car;
+    car.x = 400; car.z = 2000; car.yaw = 0;
+    s.player.yaw = 0; s.player.speed = 0;
+    const pt = s.police.patrols[0];
+    pt.x = 400; pt.z = 2100; pt.yaw = 0; pt.speed = 0;
+    const d0 = Math.hypot(pt.x - car.x, pt.z - car.z);
+    for (let i = 0; i < 10 * 60; i += 1) {
+      stepSim(s, full, dt);
+      if (s.player.speed > 15) s.player.speed = 15;
+    }
+    const d1 = Math.hypot(pt.x - car.x, pt.z - car.z);
+    check('patrol switches to chase at HEAT 3 and closes in', pt.mode === 'chase' && d1 < d0 && d1 < 40,
+      `mode ${pt.mode}, dist ${d0.toFixed(0)} -> ${d1.toFixed(1)} m, player ${s.player.speed.toFixed(1)} m/s`);
+  }
+
+  // Arrest: HEAT 3, player stopped, a patrol on the bumper, 6 s idle.
+  {
+    const s = createSim(city, { startInCar: true, traffic: false });
+    s.police.heat = 3;
+    s.police.decayAt = 1e9;
+    s.player.cash = 500;
+    s.player.carrying = true;
+    s.missions.phase = 'dropoff';
+    const car = s.player.car;
+    car.x = 400; car.z = 2000; car.yaw = 0;
+    s.player.yaw = 0; s.player.speed = 0;
+    const pt = s.police.patrols[0];
+    pt.x = 400; pt.z = 2004.5; pt.yaw = 0; pt.speed = 0;
+    for (let i = 0; i < 6 * 60; i += 1) stepSim(s, idle, dt);
+    check('arrest after 3 s stopped at HEAT 3+', s.player.mode === 'foot' && s.police.arrests === 1,
+      `mode ${s.player.mode}, arrests ${s.police.arrests}, heat ${s.police.heat}`);
+    check('arrest fines $100 and fails the mission',
+      s.player.cash === 400 && s.player.carrying === false && s.missions.phase === 'pickup',
+      `cash $${s.player.cash}, carrying ${s.player.carrying}, phase ${s.missions.phase}`);
+    check('arrest tows the car and walks Mara to the park',
+      Math.hypot(s.player.mara.x - 2410, s.player.mara.z - 710) < 1 && Math.hypot(car.x - 400, car.z - 1500) < 1,
+      `mara ${Math.round(s.player.mara.x)},${Math.round(s.player.mara.z)} car ${Math.round(car.x)},${Math.round(car.z)}`);
+    check('arrested event recorded', s.events.some((e) => e.type === 'arrested'), `${s.events.filter((e) => e.type === 'arrested').length} arrested events`);
+  }
 }
 
 // Summary.

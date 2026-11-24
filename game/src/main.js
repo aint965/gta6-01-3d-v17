@@ -7,10 +7,11 @@
 import { generateCity, districtAt, SEED } from './city.js';
 import {
   createSim, stepSim, activeTarget, getMarkers, getLightStates, getHeadlights,
-  getRenderCars, getRenderPeds, runMissionAutopilot, collect, dropCargo,
+  getRenderCars, getRenderPeds, getPolice, runMissionAutopilot, collect, dropCargo,
   interact, nearestDrivable, nearTarget, MISSIONS, PROFILES,
 } from './sim.js';
 import { createRenderer, PRESETS } from './render.js';
+import { createRadio } from './radio.js';
 
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
@@ -30,6 +31,14 @@ let preset = 'sunset';
 let camPos = [400, 8, 1530];
 let camTarget = [400, 4, 1490];
 
+// Title screen: the plain game opens on it (Enter starts, and starts the
+// radio — a user gesture, so the AudioContext is allowed). Shots, the
+// autotest and the headlight test skip it.
+const radio = createRadio();
+let mode = (shot || autotest || headlightTest) ? 'play' : 'title';
+if (mode === 'play') document.body.classList.remove('title');
+window.__radio = () => radio.state();
+
 const el = (id) => document.getElementById(id);
 const hudDistrict = el('hud-district');
 const hudObjective = el('hud-objective');
@@ -41,6 +50,8 @@ const hudPreset = el('hud-preset');
 const hudCash = el('hud-cash');
 const hudDamage = el('hud-damage');
 const hudProfile = el('hud-profile');
+const hudHeat = el('hud-heat');
+const hudRadio = el('hud-radio');
 const minimap = el('minimap');
 const mm = minimap.getContext('2d');
 
@@ -55,6 +66,14 @@ const keys = new Set();
 window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   keys.add(e.code);
+  if (e.code === 'Enter' && mode === 'title') {
+    mode = 'play';
+    document.body.classList.remove('title');
+    radio.start();
+    return;
+  }
+  if (e.code === 'KeyM') radio.toggleMute();
+  if (e.code === 'KeyR') radio.cycleLoop();
   if (e.code === 'Digit1') preset = 'midday';
   if (e.code === 'Digit2') preset = 'sunset';
   if (e.code === 'Digit3') preset = 'night';
@@ -174,6 +193,12 @@ function updateHud(now) {
   hudProfile.textContent = sim.player.mode === 'car'
     ? `${PROFILES[sim.player.profile].name} · 4/5/6/7 or B to change car`
     : 'On foot · E near a car to get in';
+  // Solmar PD: HEAT 0-5 as stars. Radio: station + loop, or off.
+  const heat = getPolice(sim).heat;
+  hudHeat.textContent = `HEAT ${'★'.repeat(heat)}${'☆'.repeat(5 - heat)}${heat >= 3 ? ' — PD IS CHASING' : heat >= 1 ? ' — PD is watching' : ''}`;
+  hudHeat.style.color = heat >= 3 ? '#ff5a3c' : heat >= 1 ? '#ffb08a' : '#8a9aa8';
+  const rs = radio.state();
+  hudRadio.textContent = rs.on ? `SOLMAR FM — ${rs.loopName}${rs.muted ? ' · muted (M)' : ' · M mute · R next loop'}` : 'SOLMAR FM — off';
   // Objective: current mission + target (dialog + HUD + world marker, all three).
   const m = MISSIONS[sim.missions.index];
   if (sim.missions.done) {
@@ -221,19 +246,40 @@ function renderFrame() {
 }
 
 const SHOTS = {
-  day: { preset: 'midday', cam: [400, 10, 3050], target: [400, 12, 1700], player: { x: 410, z: 3005, yaw: 0 } },
+  title: { preset: 'sunset', cam: [400, 28, 2400], target: [400, 22, 1728], player: { x: 410, z: 2355, yaw: 0 } },
+  daybusy: { preset: 'midday', cam: [678, 5, 1730], target: [820, 3, 1728], player: { x: 700, z: 1728, yaw: -Math.PI / 2 } },
   sunset: { preset: 'sunset', cam: [430, 4, 2200], target: [250, 12, 1300], player: { x: 415, z: 2155, yaw: 0 } },
-  night: { preset: 'night', cam: [372, 4, 1950], target: [380, 14, 1500], player: { x: 410, z: 1905, yaw: 0 } },
-  plaza: { preset: 'sunset', cam: [900, 220, 2400], target: [400, 0, 1728], player: { x: 410, z: 1900, yaw: 0 } },
+  nightpolice: { preset: 'night', cam: [400, 5.5, 2013], target: [400, 2, 1990], player: { x: 400, z: 2000, yaw: 0 } },
 };
 
 function runShot(name) {
-  const s = SHOTS[name] || SHOTS.day;
+  const s = SHOTS[name] || SHOTS.daybusy;
   preset = s.preset;
   camPos = [...s.cam];
   camTarget = [...s.target];
   const car = sim.player.car;
   if (car) { car.x = s.player.x; car.z = s.player.z; car.yaw = s.player.yaw; sim.player.yaw = s.player.yaw; sim.player.speed = 0; }
+  // Title shot shows the title overlay; the others hide it.
+  document.body.classList.toggle('title', name === 'title');
+  // Stage the scene: a busy avenue for daybusy, a patrol in the headlight
+  // beam for nightpolice. The sim is never stepped in shot mode, so the
+  // staged positions stay put for the screenshot.
+  if (name === 'daybusy') {
+    // A busy avenue: the player car in the foreground, a patrol ahead in the
+    // right lane, four traffic cars spread east down the avenue.
+    const spots = [[800, 1735], [860, 1721], [920, 1735], [1000, 1721]];
+    spots.forEach(([x, z], i) => {
+      const t = sim.traffic[i];
+      if (t) { t.x = x; t.z = z; t.yaw = -Math.PI / 2; t.speed = 0; }
+    });
+    const pt = sim.police.patrols[0];
+    if (pt) { pt.x = 750; pt.z = 1721; pt.yaw = -Math.PI / 2; pt.speed = 0; }
+  }
+  if (name === 'nightpolice') {
+    const p0 = sim.police.patrols[0], p1 = sim.police.patrols[1];
+    if (p0) { p0.x = 415; p0.z = 1980; p0.yaw = 0; p0.speed = 0; }
+    if (p1) { p1.x = 385; p1.z = 1990; p1.yaw = 0; p1.speed = 0; }
+  }
   updateHud(performance.now());
   let painted = 0;
   function paint() {
@@ -365,6 +411,21 @@ function runGame() {
     requestAnimationFrame(frame);
     const dt = Math.min((now - last) / 1000, 0.25);
     last = now;
+    if (mode === 'title') {
+      // Title screen: the sim waits, the camera drifts slowly along the
+      // boulevard behind the overlay. Enter starts the game (and the radio).
+      const z = 2300 + Math.sin(now * 0.00008) * 350;
+      camPos = [400, 28, z];
+      camTarget = [400, 22, 1728];
+      renderFrame();
+      updateHud(now);
+      if (!ready) {
+        ready = true;
+        window.__ready = true;
+        window.__stats = { ...renderer.stats, cars: getRenderCars(sim).length, buildings: city.buildings.length, peds: getRenderPeds(sim).length };
+      }
+      return;
+    }
     acc += dt;
     while (acc >= 1 / 60) { stepSim(sim, readInput(), 1 / 60); acc -= 1 / 60; }
     updateCamera(dt);
@@ -382,11 +443,15 @@ function runGame() {
 // Debug hook for the driver: authoritative sim state (the HUD text lags the sim).
 window.__simState = function () {
   const pos = playerPos();
+  const pol = getPolice(sim);
+  const rs = radio.state();
   return {
     mode: sim.player.mode, speedKmh: Math.round(Math.abs(sim.player.speed) * 3.6),
     x: +pos.x.toFixed(1), z: +pos.z.toFixed(1), yaw: +pos.yaw.toFixed(2),
     cash: sim.player.cash, damage: Math.round(sim.player.damage),
     mission: sim.missions.index + 1, phase: sim.missions.phase,
+    heat: pol.heat, arrests: pol.arrests, patrols: pol.patrols.map((p) => p.mode).join(','),
+    radio: rs.on ? rs.loopName : 'off', radioMuted: rs.muted,
     objective: document.getElementById('hud-objective').textContent,
   };
 };

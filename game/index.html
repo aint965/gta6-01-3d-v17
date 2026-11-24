@@ -27,15 +27,45 @@
   #hud-cash { font-size: 20px; font-weight: 800; color: #7dff9e; }
   #hud-damage { font-size: 12px; color: #ff8a7a; }
   #hud-profile { font-size: 12px; margin-top: 4px; color: #cfe0e6; }
+  #hud-heat { font-size: 13px; margin-top: 4px; letter-spacing: 2px; color: #ffb08a; }
+  #hud-radio { font-size: 12px; margin-top: 4px; color: #ffd28a; }
   #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* Title screen: full-screen overlay, city vista showing through the middle. */
+  #title-screen { position: fixed; inset: 0; z-index: 10; display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: #f2ede0; text-shadow: 0 2px 8px rgba(0,0,0,0.9); pointer-events: none;
+    background: linear-gradient(to bottom, rgba(8,14,24,0.85) 0%, rgba(8,14,24,0.28) 30%, rgba(8,14,24,0.05) 55%, rgba(8,14,24,0.55) 78%, rgba(8,14,24,0.9) 100%); }
+  #title-screen h1 { font-size: 76px; font-weight: 900; letter-spacing: 10px; margin: 0; color: #ffd28a; }
+  #title-screen .sub { font-size: 20px; letter-spacing: 8px; color: #d8e8e2; margin-top: 2px; }
+  #title-screen .tag { font-size: 15px; color: #cfe0e6; margin-top: 10px; }
+  #title-screen .missions { margin-top: 22px; font-size: 14px; line-height: 1.9; color: #f2ede0; background: rgba(10,20,28,0.55); border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; padding: 10px 22px; text-align: left; }
+  #title-screen .missions b { color: #7dff9e; }
+  #title-screen .start { margin-top: 26px; font-size: 20px; font-weight: 800; letter-spacing: 3px; color: #ffffff; animation: blink 1.4s steps(2) infinite; }
+  #title-screen .controls { margin-top: 14px; font-size: 13px; color: #cfe0e6; }
+  @keyframes blink { 50% { opacity: 0.25; } }
+  body.title #title-screen { display: flex; }
+  body.title .hud { display: none !important; }
 </style>
 </head>
-<body>
+<body class="title">
 <canvas id="game" aria-label="Palkon Auto: drive Mara Venn through Solmar"></canvas>
+<div id="title-screen">
+  <h1>PALKON AUTO</h1>
+  <div class="sub">S O L M A R</div>
+  <div class="tag">Mara Venn owes the city — and the city is about to collect. Four runs, one debt, no brakes.</div>
+  <div class="missions">
+    <div>1 · A Receipt for Sunshine — <b>$250</b></div>
+    <div>2 · Salt Ledger — <b>$500</b></div>
+    <div>3 · After the Shutters — <b>$450</b></div>
+    <div>4 · Glass Debt — <b>$800</b> · finale</div>
+    <div style="margin-top:6px;color:#ffd28a">Total $2,000 &nbsp;·&nbsp; SOLMAR FM on the radio &nbsp;·&nbsp; Solmar PD is watching</div>
+  </div>
+  <div class="start">PRESS ENTER TO START</div>
+  <div class="controls">WASD drive &nbsp;·&nbsp; E get in / out &nbsp;·&nbsp; Q collect &nbsp;·&nbsp; X drop cargo &nbsp;·&nbsp; 1/2/3 light &nbsp;·&nbsp; 4/5/6/7 car &nbsp;·&nbsp; M radio mute &nbsp;·&nbsp; R next station loop</div>
+</div>
 <div class="hud panel" id="hud-topleft">
   <div id="hud-title">PALKON AUTO</div>
   <div id="hud-district">Solmar</div>
   <div id="hud-objective"></div>
+  <div id="hud-heat"></div>
 </div>
 <div class="hud panel" id="hud-compass"></div>
 <div class="hud panel" id="hud-dialog"></div>
@@ -50,6 +80,7 @@
   <div id="hud-damage"></div>
   <div id="hud-preset"></div>
   <div id="hud-profile"></div>
+  <div id="hud-radio"></div>
 </div>
 <div class="hud panel" id="hud-controls">WASD drive &nbsp;·&nbsp; 1/2/3 light &nbsp;·&nbsp; T cycle light &nbsp;·&nbsp; 4/5/6/7 car &nbsp;·&nbsp; B next car &nbsp;·&nbsp; Space handbrake &nbsp;·&nbsp; Q collect &nbsp;·&nbsp; X drop cargo &nbsp;·&nbsp; E interact</div>
 <p id="status" role="status" aria-live="polite"></p>

@@ -5,13 +5,13 @@ import { createRandom, hexRgb, shade } from './rng.js';
 import { CITY_W, CITY_H } from './city.js';
 
 export const PRESETS = {
-  midday: { name: 'Midday', sky: '#aecfdd', fog: '#c8d8e2', fogDen: 0.00016,
+  midday: { name: 'Midday', sky: '#aecfdd', fog: '#c8d8e2', fogDen: 0.0002,
     lightDir: [0.25, -0.92, 0.3], lightCol: [1.0, 0.96, 0.88], amb: [0.55, 0.55, 0.55],
     emi: 0.35, sunI: 1, moonI: 0, starI: 0 },
-  sunset: { name: 'Sunset', sky: '#dd7a45', fog: '#e8a06a', fogDen: 0.00022,
+  sunset: { name: 'Sunset', sky: '#dd7a45', fog: '#e8a06a', fogDen: 0.00026,
     lightDir: [0.45, -0.16, 0.88], lightCol: [1.0, 0.55, 0.28], amb: [0.46, 0.4, 0.38],
     emi: 0.7, sunI: 1, moonI: 0, starI: 0 },
-  night: { name: 'Night', sky: '#0b1526', fog: '#0e1a2c', fogDen: 0.00028,
+  night: { name: 'Night', sky: '#0b1526', fog: '#0e1a2c', fogDen: 0.00032,
     lightDir: [0.18, -0.36, 0.92], lightCol: [0.45, 0.55, 0.75], amb: [0.16, 0.18, 0.24],
     emi: 1.0, sunI: 0, moonI: 1, starI: 1 },
 };
@@ -242,6 +242,22 @@ export function buildStatic(city) {
         win(b.x1, y, z, 1, 0); win(b.x0, y, z, -1, 0);
       }
     }
+    // Rooftop clutter: AC boxes, water tanks and antennas on a deterministic
+    // subset of taller roofs, so the skyline stops reading as flat slabs.
+    if (b.landmark !== 'tower' && b.h >= 15 && rng() < 0.45) {
+      const cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
+      const kind = rng();
+      if (kind < 0.4) {
+        m.box(cx - w * 0.15, b.h + 0.7, cz - d * 0.1, 3, 1.4, 2.4, 0, hexRgb('#9aa2a8'), { spec: 0.3 });
+        m.box(cx + w * 0.2, b.h + 0.5, cz + d * 0.15, 2.2, 1, 1.8, 0, hexRgb('#7d848a'), { spec: 0.3 });
+      } else if (kind < 0.75) {
+        m.box(cx, b.h + 1.2, cz, 2.6, 2.4, 2.6, 0, hexRgb('#8a6a42'));
+        m.box(cx, b.h + 2.55, cz, 3, 0.5, 3, 0, hexRgb('#6b4a2f'));
+      } else {
+        m.box(cx, b.h + 2.5, cz, 0.25, 5, 0.25, 0, hexRgb('#3a444a'));
+        m.box(cx, b.h + 5.1, cz, 0.6, 0.6, 0.6, 0, hexRgb('#ff2a1a'), { emi: [0.8, 0.1, 0.05] });
+      }
+    }
   }
 
   // Clock tower faces + spire; fountain basin with water.
@@ -347,7 +363,10 @@ function buildSky(rng) {
   };
   fan('sun', hexRgb('#ffdf9e'), 1, false);
   fan('sun', hexRgb('#c25a20'), 1.5, true);
-  fan('moon', hexRgb('#dfe8f2'), 1, false);
+  // Moon: smaller disc (0.7) with a dim halo, so it reads as a distant body
+  // instead of a big flat white plate.
+  fan('moon', hexRgb('#dfe8f2'), 0.7, false);
+  fan('moon', hexRgb('#8fa8c8'), 1.35, true);
   // Stars: tiny quads at random upper-hemisphere directions.
   for (let i = 0; i < 220; i += 1) {
     const az = rng() * Math.PI * 2, el = Math.asin(rng() * 0.95 + 0.05);
@@ -366,7 +385,8 @@ function buildSky(rng) {
 
 // One car in the dynamic mesh: body + cabin + 4 wheels + headlights + taillights.
 // Every car the city defines goes through this same pass — parked, drivable, traffic.
-function drawCar(m, car) {
+// Patrol cars get a white roof + a flashing red/blue light bar (time in seconds).
+function drawCar(m, car, time = 0) {
   const c = Math.cos(car.yaw), s = Math.sin(car.yaw);
   const rot = (x, z) => [car.x + x * c + z * s, car.z - x * s + z * c];
   const part = (ox, oy, oz, sx, sy, sz, col, o = {}) => {
@@ -383,6 +403,16 @@ function drawCar(m, car) {
   part(0.6, 0.9, -2.21, 0.5, 0.25, 0.1, hexRgb('#fff2cc'), { emi: [0.9, 0.8, 0.5] });
   part(-0.6, 0.95, 2.21, 0.5, 0.25, 0.1, hexRgb('#ff2a1a'), { emi: [0.8, 0.1, 0.05] });
   part(0.6, 0.95, 2.21, 0.5, 0.25, 0.1, hexRgb('#ff2a1a'), { emi: [0.8, 0.1, 0.05] });
+  if (car.kind === 'patrol') {
+    // Solmar PD livery: white roof panel + a light bar that alternates
+    // red-left / blue-right about twice a second.
+    part(0, 2.42, -0.2, 1.8, 0.1, 2.3, hexRgb('#e8e8e8'), { spec: 0.3 });
+    const phase = Math.floor(time * 2.5) % 2;
+    const red = phase === 0 ? [1.6, 0.05, 0.05] : [0.25, 0.02, 0.02];
+    const blue = phase === 0 ? [0.02, 0.02, 0.25] : [0.05, 0.05, 1.6];
+    part(-0.45, 2.55, -0.2, 0.7, 0.18, 0.5, hexRgb('#ff2a1a'), { emi: red });
+    part(0.45, 2.55, -0.2, 0.7, 0.18, 0.5, hexRgb('#2a4aff'), { emi: blue });
+  }
 }
 
 // One pedestrian: legs + jacket torso + head, rotated by yaw.
@@ -448,7 +478,7 @@ function drawLenses(m, lights) {
 // is edge-on to the camera, so it covers ~0 pixels. The discs face the camera
 // directly, so they wash the road and the car ahead; each disc is dimmer and
 // wider than the last (apex bright warm, base dim).
-function drawCone(m, hx, hy, hz, yaw) {
+function drawCone(m, hx, hy, hz, yaw, scale = 1) {
   const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
   const rx = Math.cos(yaw), rz = -Math.sin(yaw);
   const zero = [0, 0, 0];
@@ -463,6 +493,7 @@ function drawCone(m, hx, hy, hz, yaw) {
     { d: 21, r: 2.8, e: [0.04, 0.03, 0.02] },
   ];
   for (const disc of discs) {
+    const e = [disc.e[0] * scale, disc.e[1] * scale, disc.e[2] * scale];
     const cx = hx + fx * disc.d, cy = hy, cz = hz + fz * disc.d;
     const seg = 12;
     for (let i = 0; i < seg; i += 1) {
@@ -470,19 +501,19 @@ function drawCone(m, hx, hy, hz, yaw) {
       const p0 = [cx + rx * Math.cos(a0) * disc.r, cy + Math.sin(a0) * disc.r * 1.5, cz + rz * Math.cos(a0) * disc.r];
       const p1 = [cx + rx * Math.cos(a1) * disc.r, cy + Math.sin(a1) * disc.r * 1.5, cz + rz * Math.cos(a1) * disc.r];
       // Fan triangle: centre, p0, p1. (The disc's up axis is world Y.)
-      m.v(cx, cy, cz, 0, 1, 0, zero, disc.e, 0, 0, 0, 1, 0, 0);
-      m.v(p0[0], p0[1], p0[2], 0, 1, 0, zero, disc.e, 0, 0, 0, 1, 0, 0);
-      m.v(p1[0], p1[1], p1[2], 0, 1, 0, zero, disc.e, 0, 0, 0, 1, 0, 0);
+      m.v(cx, cy, cz, 0, 1, 0, zero, e, 0, 0, 0, 1, 0, 0);
+      m.v(p0[0], p0[1], p0[2], 0, 1, 0, zero, e, 0, 0, 0, 1, 0, 0);
+      m.v(p1[0], p1[1], p1[2], 0, 1, 0, zero, e, 0, 0, 0, 1, 0, 0);
     }
   }
 }
 
 // Ground light pool ahead of the car: bright near, dim far (per-vertex emissive).
-function drawPool(m, hx, hz, yaw) {
+function drawPool(m, hx, hz, yaw, scale = 1) {
   const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
   const rx = Math.cos(yaw), rz = -Math.sin(yaw);
   const near = 3, far = 24, wNear = 2.2, wFar = 5.5;
-  const bright = [0.45, 0.36, 0.2], dim = [0.05, 0.04, 0.02];
+  const bright = [0.45 * scale, 0.36 * scale, 0.2 * scale], dim = [0.05 * scale, 0.04 * scale, 0.02 * scale];
   const zero = [0, 0, 0];
   const p = (along, side, e) => {
     const x = hx + fx * along + rx * side, z = hz + fz * along + rz * side;
@@ -622,7 +653,7 @@ export function createRenderer(canvas, city) {
     gl.drawArrays(gl.TRIANGLES, 0, staticCount);
 
     dyn.reset();
-    for (const car of view.cars || []) drawCar(dyn, car);
+    for (const car of view.cars || []) drawCar(dyn, car, view.time || 0);
     for (const p of view.peds || []) drawPed(dyn, p);
     if (view.mara) drawPed(dyn, { ...view.mara, jacket: '#d77f69' });
     for (const mk of view.markers || []) drawMarker(dyn, mk, view.time || 0);
@@ -638,6 +669,9 @@ export function createRenderer(canvas, city) {
 
     // Additive pass: headlight cones + ground pool + marker beams. Depth-tested
     // (occluded by buildings/cars) but depth-write off, ONE/ONE blending.
+    // Daytime beams are faint (0.35) so the cones do not read as arcs on the
+    // road in full sun; sunset 0.7, night full strength.
+    const beamScale = view.preset === 'midday' ? 0.35 : view.preset === 'sunset' ? 0.7 : 1;
     const hl = view.headlights;
     const beams = view.markers || [];
     if ((hl && hl.on) || beams.length) {
@@ -648,9 +682,9 @@ export function createRenderer(canvas, city) {
         for (const side of [-0.6, 0.6]) {
           // Apex at the front bumper (2.2 m ahead of the centre) + lateral offset.
           const hx = hl.x + fx * 2.2 + rx * side, hz = hl.z + fz * 2.2 + rz * side;
-          drawCone(dyn, hx, 0.9, hz, hl.yaw);
+          drawCone(dyn, hx, 0.9, hz, hl.yaw, beamScale);
         }
-        drawPool(dyn, hl.x + fx * 2.2, hl.z + fz * 2.2, hl.yaw);
+        drawPool(dyn, hl.x + fx * 2.2, hl.z + fz * 2.2, hl.yaw, beamScale);
       }
       for (const mk of beams) {
         // Two crossed vertical quads, dim warm, from the ground to y=25.

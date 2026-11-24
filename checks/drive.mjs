@@ -29,6 +29,7 @@ async function waitHttp(url, tries = 40) {
 const chrome = spawn(CHROME, [
   '--no-sandbox', '--disable-gpu-sandbox', '--disable-dev-shm-usage',
   '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader',
+  '--autoplay-policy=no-user-gesture-required',
   `--remote-debugging-port=${PORT}`, '--window-size=1280,720', 'about:blank',
 ], { stdio: 'ignore' });
 
@@ -95,10 +96,12 @@ try {
 
   mkdirSync(OUT, { recursive: true });
 
-  // 1. Gameplay: enter the car, midday, drive north 3 s, screenshot.
+  // 1. Gameplay: dismiss the title (Enter), enter the car, midday, drive north 3 s, screenshot.
   events.length = 0;
   await send('Page.navigate', { url: BASE + '/' }, sessionId);
   if (!await waitFor('window.__ready === true', 30000)) throw new Error('game never became ready');
+  await key('keyDown', 'Enter', 'Enter'); await key('keyUp', 'Enter', 'Enter'); // dismiss the title (starts SOLMAR FM)
+  await sleep(500);
   await key('keyDown', 'KeyE', 'e'); await key('keyUp', 'KeyE', 'e'); // get in the car
   await sleep(800);
   await key('keyDown', 'Digit1', '1'); await key('keyUp', 'Digit1', '1'); // midday
@@ -113,7 +116,25 @@ try {
   const driveHud = await evalJs('JSON.stringify(window.__simState ? window.__simState() : {speed: document.getElementById("hud-speed-num").textContent})');
   results.driveDay = { ...driveShot, hud: JSON.parse(driveHud) };
 
-  // 2. Headlight test: screenshot the cones-on night scene FIRST (the test
+  // 2. Radio: fresh page, Enter dismisses the title and starts SOLMAR FM.
+  // The analyser must show real signal, M must mute to silence, M again unmutes.
+  events.length = 0;
+  await send('Page.navigate', { url: BASE + '/' }, sessionId);
+  if (!await waitFor('window.__ready === true', 30000)) throw new Error('radio page never became ready');
+  await key('keyDown', 'Enter', 'Enter'); await key('keyUp', 'Enter', 'Enter');
+  await sleep(3000);
+  drainEvents();
+  const radio1 = JSON.parse(await evalJs('JSON.stringify(window.__radio())'));
+  await key('keyDown', 'KeyM', 'm'); await key('keyUp', 'KeyM', 'm');
+  await sleep(500);
+  const radio2 = JSON.parse(await evalJs('JSON.stringify(window.__radio())'));
+  await key('keyDown', 'KeyM', 'm'); await key('keyUp', 'KeyM', 'm');
+  await sleep(500);
+  const radio3 = JSON.parse(await evalJs('JSON.stringify(window.__radio())'));
+  const radioHud = await evalJs('document.getElementById("hud-radio").textContent');
+  results.radio = { on: radio1, muted: radio2, unmuted: radio3, hud: radioHud };
+
+  // 3. Headlight test: screenshot the cones-on night scene FIRST (the test
   // leaves a cones-off frame on screen), then run the pixel test.
   events.length = 0;
   await send('Page.navigate', { url: BASE + '/?test=headlight' }, sessionId);
@@ -124,7 +145,7 @@ try {
   const hlResult = await evalJs('JSON.stringify(window.__headlightTest())');
   results.headlight = { ...nightShot, result: JSON.parse(hlResult) };
 
-  // 3. Mission autotest: synchronous in-page autopilot; the headless shell is
+  // 4. Mission autotest: synchronous in-page autopilot; the headless shell is
   // slow, so allow up to 240 s.
   events.length = 0;
   await send('Page.navigate', { url: BASE + '/?autotest=missions' }, sessionId);
@@ -141,6 +162,10 @@ try {
   if (errors.length || failedReqs.length) exitCode = 2;
   if (!results.headlight.result.pass) exitCode = 2;
   if (!results.autotest.done || results.autotest.cash !== 2000 || results.autotest.collisions !== 0) exitCode = 2;
+  if (!results.radio.on.on || results.radio.on.ctxState !== 'running' || results.radio.on.level <= 0.001 || results.radio.on.scheduled <= 0) exitCode = 2;
+  if (!results.radio.muted.muted || results.radio.muted.level > 0.001) exitCode = 2;
+  if (results.radio.unmuted.muted) exitCode = 2;
+  if (!results.radio.hud.includes('SOLMAR FM')) exitCode = 2;
   ws.close();
 } catch (e) {
   console.error('DRIVE FAILED: ' + e.message);
